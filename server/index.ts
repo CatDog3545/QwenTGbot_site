@@ -145,7 +145,7 @@ app.post('/api/chat', getAuthMiddleware, async (req, res) => {
       throw new Error(`OpenRouter responded with ${response.status}`)
     }
 
-    const data = await response.json()
+    const data: { choices?: { message?: { content?: string } }[] } = await response.json()
     const reply = data.choices?.[0]?.message?.content || 'No response'
 
     session.messages.push({ role: 'user', content: message })

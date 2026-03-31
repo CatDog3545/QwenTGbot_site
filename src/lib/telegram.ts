@@ -54,7 +54,7 @@ declare global {
         BackButton: {
           isVisible: boolean
           onClick: (cb: () => void) => void
-          offClick: (cb: () => void) void
+          offClick: (cb: () => void) => void
           show: () => void
           hide: () => void
         }
