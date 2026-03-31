@@ -17,7 +17,7 @@ if (isProduction) {
 
 const BOT_TOKEN = process.env.BOT_TOKEN || ''
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || ''
-const MODEL = 'qwen/qwen3.6-plus-preview:free'
+const MODEL = process.env.OPENROUTER_MODEL || 'qwen/qwen3.6-plus-preview:free'
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions'
 
