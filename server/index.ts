@@ -16,7 +16,24 @@ if (isProduction) {
 }
 
 const BOT_TOKEN = process.env.BOT_TOKEN || ''
-const AI_BACKEND_URL = process.env.AI_BACKEND_URL || ''
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || ''
+const MODEL = 'qwen/qwen3.6-plus-preview:free'
+
+const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions'
+
+interface ChatMessage {
+  role: 'system' | 'user' | 'assistant'
+  content: string
+}
+
+interface ChatSession {
+  messages: ChatMessage[]
+  updatedAt: number
+}
+
+const chatSessions = new Map<string, ChatSession>()
+
+const SYSTEM_PROMPT = `You are a helpful AI assistant. Respond in the same language the user writes in. Be concise, accurate, and friendly. Use markdown formatting for code blocks, lists, and tables when appropriate.`
 
 function validateTelegramInitData(initData: string): Record<string, string> | null {
   if (!initData || !BOT_TOKEN) return null
@@ -69,48 +86,73 @@ function getAuthMiddleware(req: express.Request, res: express.Response, next: ex
   next()
 }
 
-async function callAIBackend(
-  userId: number,
-  chatId: string,
-  message: string,
-  history: { role: string; content: string }[],
-  endpoint: string,
-): Promise<Response> {
-  const url = `${AI_BACKEND_URL}${endpoint}`
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      user_id: userId,
-      chat_id: chatId,
-      message,
-      history: history || [],
-    }),
-  })
+function getSessionKey(userId: number, chatId: string): string {
+  return `${userId}:${chatId}`
+}
 
-  if (!response.ok) {
-    throw new Error(`AI backend responded with ${response.status}`)
+function getOrCreateSession(userId: number, chatId: string): ChatSession {
+  const key = getSessionKey(userId, chatId)
+  let session = chatSessions.get(key)
+  if (!session) {
+    session = { messages: [], updatedAt: Date.now() }
+    chatSessions.set(key, session)
   }
+  return session
+}
 
-  return response
+function buildMessages(session: ChatSession, newUserMessage: string): ChatMessage[] {
+  return [
+    { role: 'system', content: SYSTEM_PROMPT },
+    ...session.messages.slice(-20),
+    { role: 'user', content: newUserMessage },
+  ]
 }
 
 app.post('/api/chat', getAuthMiddleware, async (req, res) => {
-  const { message, chatId, history } = req.body
+  const { message, chatId } = req.body
   const telegramUser = (req as any).telegramUser
 
   if (!message || typeof message !== 'string') {
     return res.status(400).json({ error: 'Message is required' })
   }
 
-  if (!AI_BACKEND_URL) {
-    return res.status(503).json({ error: 'AI backend not configured' })
+  if (!OPENROUTER_API_KEY) {
+    return res.status(503).json({ error: 'OpenRouter API key not configured' })
   }
 
+  const session = getOrCreateSession(telegramUser.id, chatId)
+  const messages = buildMessages(session, message)
+
   try {
-    const response = await callAIBackend(telegramUser.id, chatId, message, history, '/api/ai')
+    const response = await fetch(OPENROUTER_URL, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': process.env.APP_URL || 'https://github.com',
+        'X-Title': 'Telegram Mini App Chat',
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        messages,
+        max_tokens: 4096,
+      }),
+    })
+
+    if (!response.ok) {
+      const errorText = await response.text()
+      console.error('OpenRouter error:', response.status, errorText)
+      throw new Error(`OpenRouter responded with ${response.status}`)
+    }
+
     const data = await response.json()
-    res.json({ reply: data.reply, chatId })
+    const reply = data.choices?.[0]?.message?.content || 'No response'
+
+    session.messages.push({ role: 'user', content: message })
+    session.messages.push({ role: 'assistant', content: reply })
+    session.updatedAt = Date.now()
+
+    res.json({ reply, chatId })
   } catch (err) {
     console.error('Chat error:', err)
     res.status(502).json({ error: 'Failed to get AI response' })
@@ -118,7 +160,7 @@ app.post('/api/chat', getAuthMiddleware, async (req, res) => {
 })
 
 app.post('/api/chat/stream', getAuthMiddleware, async (req, res) => {
-  const { message, chatId, history } = req.body
+  const { message, chatId } = req.body
   const telegramUser = (req as any).telegramUser
 
   res.setHeader('Content-Type', 'text/event-stream')
@@ -126,13 +168,39 @@ app.post('/api/chat/stream', getAuthMiddleware, async (req, res) => {
   res.setHeader('Connection', 'keep-alive')
   res.setHeader('X-Accel-Buffering', 'no')
 
-  if (!AI_BACKEND_URL) {
-    res.write(`data: ${JSON.stringify({ error: 'AI backend not configured' })}\n\n`)
+  if (!OPENROUTER_API_KEY) {
+    res.write(`data: ${JSON.stringify({ error: 'OpenRouter API key not configured' })}\n\n`)
     return res.end()
   }
 
+  const session = getOrCreateSession(telegramUser.id, chatId)
+  const messages = buildMessages(session, message)
+
+  let fullReply = ''
+
   try {
-    const response = await callAIBackend(telegramUser.id, chatId, message, history, '/api/ai/stream')
+    const response = await fetch(OPENROUTER_URL, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': process.env.APP_URL || 'https://github.com',
+        'X-Title': 'Telegram Mini App Chat',
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        messages,
+        stream: true,
+        max_tokens: 4096,
+      }),
+    })
+
+    if (!response.ok) {
+      const errorText = await response.text()
+      console.error('OpenRouter stream error:', response.status, errorText)
+      res.write(`data: ${JSON.stringify({ error: `OpenRouter error: ${response.status}` })}\n\n`)
+      return res.end()
+    }
 
     const reader = response.body?.getReader()
     if (!reader) {
@@ -140,13 +208,37 @@ app.post('/api/chat/stream', getAuthMiddleware, async (req, res) => {
     }
 
     const decoder = new TextDecoder()
+    let buffer = ''
+
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
 
-      const chunk = decoder.decode(value, { stream: true })
-      res.write(`data: ${chunk}\n\n`)
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
+
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed || trimmed === 'data: [DONE]') continue
+        if (!trimmed.startsWith('data: ')) continue
+
+        try {
+          const json = JSON.parse(trimmed.slice(6))
+          const content = json.choices?.[0]?.delta?.content
+          if (content) {
+            fullReply += content
+            res.write(`data: ${JSON.stringify({ content })}\n\n`)
+          }
+        } catch {
+          // skip malformed SSE lines
+        }
+      }
     }
+
+    session.messages.push({ role: 'user', content: message })
+    session.messages.push({ role: 'assistant', content: fullReply })
+    session.updatedAt = Date.now()
 
     res.write('data: [DONE]\n\n')
     res.end()
@@ -160,14 +252,25 @@ app.post('/api/chat/stream', getAuthMiddleware, async (req, res) => {
 app.get('/api/chats', getAuthMiddleware, async (req, res) => {
   const telegramUser = (req as any).telegramUser
   const userId = telegramUser.id
+  const prefix = `${userId}:`
 
-  try {
-    const response = await fetch(`${AI_BACKEND_URL}/api/chats?user_id=${userId}`)
-    const data = await response.json()
-    res.json(data)
-  } catch {
-    res.json({ chats: [] })
+  const chats = []
+  for (const [key, session] of chatSessions) {
+    if (key.startsWith(prefix)) {
+      const chatId = key.slice(prefix.length)
+      const lastUserMsg = [...session.messages].reverse().find((m) => m.role === 'user')
+      const lastMsg = session.messages[session.messages.length - 1]
+      chats.push({
+        id: chatId,
+        title: lastUserMsg?.content?.slice(0, 50) || 'Chat',
+        lastMessage: lastMsg?.content?.slice(0, 100) || '',
+        lastMessageTime: session.updatedAt,
+      })
+    }
   }
+
+  chats.sort((a, b) => b.lastMessageTime - a.lastMessageTime)
+  res.json({ chats })
 })
 
 app.get('/api/chats/:chatId/messages', getAuthMiddleware, async (req, res) => {
@@ -175,13 +278,19 @@ app.get('/api/chats/:chatId/messages', getAuthMiddleware, async (req, res) => {
   const telegramUser = (req as any).telegramUser
   const userId = telegramUser.id
 
-  try {
-    const response = await fetch(`${AI_BACKEND_URL}/api/chats/${chatId}/messages?user_id=${userId}`)
-    const data = await response.json()
-    res.json(data)
-  } catch {
-    res.json({ messages: [] })
+  const session = chatSessions.get(getSessionKey(userId, chatId))
+  if (!session) {
+    return res.json({ messages: [] })
   }
+
+  const messages = session.messages.map((msg, idx) => ({
+    id: `${chatId}-${idx}`,
+    role: msg.role,
+    content: msg.content,
+    timestamp: session.updatedAt,
+  }))
+
+  res.json({ messages })
 })
 
 app.delete('/api/chats/:chatId', getAuthMiddleware, async (req, res) => {
@@ -189,30 +298,12 @@ app.delete('/api/chats/:chatId', getAuthMiddleware, async (req, res) => {
   const telegramUser = (req as any).telegramUser
   const userId = telegramUser.id
 
-  try {
-    await fetch(`${AI_BACKEND_URL}/api/chats/${chatId}?user_id=${userId}`, {
-      method: 'DELETE',
-    })
-    res.json({ success: true })
-  } catch {
-    res.status(500).json({ error: 'Failed to delete chat' })
-  }
+  chatSessions.delete(getSessionKey(userId, chatId))
+  res.json({ success: true })
 })
 
-app.patch('/api/chats/:chatId', getAuthMiddleware, async (req, res) => {
-  const { chatId } = req.params
-  const { title } = req.body
-
-  try {
-    await fetch(`${AI_BACKEND_URL}/api/chats/${chatId}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title }),
-    })
-    res.json({ success: true })
-  } catch {
-    res.status(500).json({ error: 'Failed to rename chat' })
-  }
+app.patch('/api/chats/:chatId', getAuthMiddleware, async (_req, res) => {
+  res.json({ success: true })
 })
 
 app.get('/api/health', (_req, res) => {
