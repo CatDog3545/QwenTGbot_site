@@ -13,6 +13,7 @@ const api = axios.create({
 
 api.interceptors.request.use((config) => {
   const initData = tg.getInitData()
+  console.log('[API] initData available:', !!initData, 'length:', initData?.length || 0)
   if (initData) {
     config.headers['X-Telegram-Init-Data'] = initData
   }
