@@ -65,14 +65,27 @@ function validateTelegramInitData(initData: string): Record<string, string> | nu
 
 function getAuthMiddleware(req: express.Request, res: express.Response, next: express.NextFunction) {
   const initData = req.headers['x-telegram-init-data'] as string
+
+  if (!initData) {
+    console.error('Auth: missing X-Telegram-Init-Data header')
+    return res.status(401).json({ error: 'Missing X-Telegram-Init-Data header' })
+  }
+
+  if (!BOT_TOKEN) {
+    console.error('Auth: BOT_TOKEN not configured')
+    return res.status(401).json({ error: 'Server not configured (BOT_TOKEN missing)' })
+  }
+
   const parsed = validateTelegramInitData(initData)
 
   if (!parsed) {
-    return res.status(401).json({ error: 'Invalid or missing Telegram initData' })
+    console.error('Auth: invalid initData, hash mismatch')
+    return res.status(401).json({ error: 'Invalid Telegram initData' })
   }
 
   const userStr = parsed.user
   if (!userStr) {
+    console.error('Auth: missing user in initData')
     return res.status(401).json({ error: 'Missing user data' })
   }
 
